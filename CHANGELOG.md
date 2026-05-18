@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The floating `v1` tag tracks the latest `1.x` release. Consumers pinning
 `microsoft/apm-action@v1` receive minor and patch updates automatically.
 
+## [Unreleased]
+
+### Added
+
+- **Pack pass-through inputs for marketplace publishing** ([microsoft/apm#1348]). New inputs forward APM CLI flags that previously had no surface in the action:
+  - `marketplace` -> `apm pack --marketplace=<value>` (comma-separated format list, `all`, or `none`)
+  - `marketplace-path` -> repeatable `apm pack --marketplace-path FORMAT=PATH` overrides (newline-separated; `,` is a legal filename character and is not used as a separator)
+  - `json-output` -> `apm pack --json` with stdout captured to the requested path (must resolve inside the working directory)
+  - `offline` -> `apm pack --offline`
+  - `include-prerelease` -> `apm pack --include-prerelease`
+- **`pack-json` output**. Path to the captured `--json` report. Source of truth for downstream steps that need to enumerate every artifact (bundles, marketplace files, sidecars) without globbing `build/`.
+
+### Changed
+
+- **`bundle-path` output is now empty for marketplace-only projects** instead of failing the action. When `apm.yml` has no `dependencies:` block, `apm pack` produces only marketplace artifacts; the action now sets `bundle-path: ''` and surfaces the artifacts via `pack-json`. Legacy callers that still expect a bundle (no `json-output` set) continue to receive a hard error with an actionable message. **Action required for consumers:** any downstream step using `if: steps.pack.outputs.bundle-path != ''` will now correctly skip on marketplace-only projects; consumers that expect a bundle should keep their existing logic.
+- **`setup-only` conflict list extended** to include the new pack pass-through inputs (`marketplace`, `marketplace-path`, `json-output`, `offline`, `include-prerelease`). Setting any of them with `setup-only: true` now fails fast with a consolidated error.
+
 ## [1.7.3] - 2026-05-11
 
 ### Changed
@@ -46,6 +63,8 @@ APM v0.12.3 made harness detection strict (no more silent default-to-copilot). E
 
 [#33]: https://github.com/microsoft/apm-action/pull/33
 [#34]: https://github.com/microsoft/apm-action/pull/34
+
+[microsoft/apm#1348]: https://github.com/microsoft/apm/issues/1348
 
 ## [1.6.0] - 2026-05-02
 

@@ -175,14 +175,59 @@ export async function extractBundle(bundlePath: string, outputDir: string): Prom
   return { files, verified: false, format };
 }
 
+export interface PackOptions {
+  target?: string;
+  archive: boolean;
+  format: BundleFormat;
+  /**
+   * Value for `apm pack --marketplace=<value>`. Accepts a comma-separated
+   * list of format names ('claude,codex'), 'all', or 'none'. Forwarded
+   * verbatim to the CLI.
+   */
+  marketplace?: string;
+  /**
+   * Repeatable `--marketplace-path FORMAT=PATH` overrides. Each element
+   * must already be in `FORMAT=PATH` shape (the runner parses caller
+   * input into this list).
+   */
+  marketplacePath?: string[];
+  /** Forward `--offline` to skip network resolution of marketplace refs. */
+  offline?: boolean;
+  /** Forward `--include-prerelease` to consider pre-release version tags. */
+  includePrerelease?: boolean;
+  /**
+   * When set, pass `--json` to `apm pack` and capture stdout to this path.
+   * The CLI routes human-readable logs to stderr in this mode.
+   */
+  jsonOutput?: string;
+}
+
+export interface PackResult {
+  /**
+   * Path to the produced bundle, or null when the project produced only
+   * marketplace artifacts (no `dependencies:` block in apm.yml). Callers
+   * that need the bundle should error on null; callers that drive
+   * marketplace-only releases should consume `marketplaceJsonPath`.
+   */
+  bundlePath: string | null;
+  format: BundleFormat;
+  /**
+   * Path to the captured `--json` stdout when `jsonOutput` was set,
+   * otherwise null. Always populated when the JSON capture succeeded,
+   * regardless of bundle presence.
+   */
+  marketplaceJsonPath: string | null;
+}
+
 /**
  * Run `apm pack` after install and return the path to the produced bundle
- * along with the format that was used.
+ * (when one was produced) along with the format and the optional JSON
+ * report path.
  */
 export async function runPackStep(
   workingDir: string,
-  opts: { target?: string; archive: boolean; format: BundleFormat },
-): Promise<{ bundlePath: string; format: BundleFormat }> {
+  opts: PackOptions,
+): Promise<PackResult> {
   const resolvedDir = path.resolve(workingDir);
   const buildDir = path.join(resolvedDir, 'build');
 
@@ -196,31 +241,120 @@ export async function runPackStep(
   if (opts.archive) {
     args.push('--archive');
   }
+  if (opts.marketplace !== undefined && opts.marketplace !== '') {
+    args.push('--marketplace', opts.marketplace);
+  }
+  if (opts.marketplacePath && opts.marketplacePath.length > 0) {
+    for (const override of opts.marketplacePath) {
+      args.push('--marketplace-path', override);
+    }
+  }
+  if (opts.offline) {
+    args.push('--offline');
+  }
+  if (opts.includePrerelease) {
+    args.push('--include-prerelease');
+  }
+  if (opts.jsonOutput) {
+    args.push('--json');
+  }
 
   core.info(`Running: apm ${args.join(' ')}`);
-  const rc = await exec.exec('apm', args, {
+
+  // When --json is requested, capture stdout in-memory and persist it to
+  // the requested path. Logs continue to flow through stderr (the CLI
+  // routes human output to stderr under --json).
+  const jsonChunks: Buffer[] = [];
+  const execOpts: exec.ExecOptions = {
     cwd: resolvedDir,
     ignoreReturnCode: true,
     env: { ...process.env as Record<string, string> },
-  });
+  };
+  if (opts.jsonOutput) {
+    // silent: true suppresses both stdout and stderr from @actions/exec.
+    // We need stdout suppressed (it's the JSON payload going to disk, not
+    // the job log), but stderr is where the CLI emits human-readable
+    // progress logs and failure diagnostics under --json. Re-attach a
+    // stderr listener that forwards every chunk to the job log so a
+    // failed pack still surfaces actionable detail beyond the exit code.
+    execOpts.silent = true;
+    execOpts.listeners = {
+      stdout: (data: Buffer) => {
+        jsonChunks.push(Buffer.from(data));
+      },
+      stderr: (data: Buffer) => {
+        process.stderr.write(data);
+      },
+    };
+  }
+  const rc = await exec.exec('apm', args, execOpts);
   if (rc !== 0) {
     throw new Error(`apm pack failed with exit code ${rc}`);
   }
 
-  // Find the produced bundle in build/
-  const bundlePath = findBundle(buildDir, opts.archive);
-  core.info(`Bundle produced: ${bundlePath}`);
-  return { bundlePath, format: opts.format };
+  let marketplaceJsonPath: string | null = null;
+  if (opts.jsonOutput) {
+    const resolvedJsonPath = path.isAbsolute(opts.jsonOutput)
+      ? path.resolve(opts.jsonOutput)
+      : path.resolve(resolvedDir, opts.jsonOutput);
+    // Workspace containment: the action layer must not write outside the
+    // working directory. Cosmetic on GitHub-hosted ephemeral runners; load-
+    // bearing on self-hosted and shared runners. Mirrors resolveLocalBundle.
+    const rel = path.relative(resolvedDir, resolvedJsonPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new Error(
+        `json-output path resolves outside the working directory: '${opts.jsonOutput}' `
+        + `(resolved to '${resolvedJsonPath}', working-directory is '${resolvedDir}'). `
+        + `Use a workspace-relative path.`,
+      );
+    }
+    fs.mkdirSync(path.dirname(resolvedJsonPath), { recursive: true });
+    fs.writeFileSync(resolvedJsonPath, Buffer.concat(jsonChunks));
+    marketplaceJsonPath = resolvedJsonPath;
+    core.info(`Pack JSON report written to: ${resolvedJsonPath}`);
+  }
+
+  // Marketplace-only projects (no `dependencies:` block in apm.yml)
+  // produce no bundle. Detect that case instead of throwing.
+  const bundlePath = findBundleOrNull(buildDir, opts.archive);
+  if (bundlePath !== null) {
+    core.info(`Bundle produced: ${bundlePath}`);
+  } else if (marketplaceJsonPath !== null) {
+    core.info('No bundle produced (marketplace-only project); see pack JSON report.');
+  } else {
+    // No bundle and no JSON report. Two distinct misconfigurations land
+    // here; surface both so users do not blindly set json-output and then
+    // wonder why bundle-path is still empty.
+    throw new Error(
+      'apm pack produced no bundle. Two common causes:\n'
+      + '  1. The project has a `dependencies:` block but the install/pack '
+      + 'step failed silently. Check the logs above.\n'
+      + '  2. The project is marketplace-only (no `dependencies:` block in '
+      + 'apm.yml). In that case set the json-output input so the action can '
+      + 'surface the marketplace artifacts via the pack-json output.',
+    );
+  }
+  return { bundlePath, format: opts.format, marketplaceJsonPath };
 }
 
 /**
  * Find the bundle output in the build directory.
  * For archives: look for .tar.gz files.
  * For directories: look for non-hidden directories.
+ *
+ * Returns null when the build directory is missing or contains no bundle
+ * candidate. Marketplace-only projects (no `dependencies:` block in
+ * apm.yml) legitimately produce no bundle; callers that have other
+ * evidence of success (such as a captured `--json` report) treat null as
+ * a non-error. Callers that require a bundle should error on null.
+ *
+ * Still throws on ambiguity (multiple bundle candidates in one build
+ * dir) -- that condition almost always indicates a stale build/ from a
+ * previous pack and is worth surfacing as a hard error.
  */
-function findBundle(buildDir: string, archive: boolean): string {
+function findBundleOrNull(buildDir: string, archive: boolean): string | null {
   if (!fs.existsSync(buildDir)) {
-    throw new Error(`Build directory not found: ${buildDir}`);
+    return null;
   }
 
   const entries = fs.readdirSync(buildDir);
@@ -228,7 +362,7 @@ function findBundle(buildDir: string, archive: boolean): string {
   if (archive) {
     const archives = entries.filter(e => e.endsWith('.tar.gz')).sort();
     if (archives.length === 0) {
-      throw new Error('No .tar.gz archive found in build directory after apm pack');
+      return null;
     }
     if (archives.length > 1) {
       throw new Error(
@@ -244,7 +378,7 @@ function findBundle(buildDir: string, archive: boolean): string {
     return fs.statSync(path.join(buildDir, e)).isDirectory();
   }).sort();
   if (dirs.length === 0) {
-    throw new Error('No bundle directory found in build directory after apm pack');
+    return null;
   }
   if (dirs.length > 1) {
     throw new Error(

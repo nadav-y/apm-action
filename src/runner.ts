@@ -27,6 +27,45 @@ function resolveBundleFormat(): BundleFormat {
 }
 
 /**
+ * Parse the `marketplace-path` input into a list of `FORMAT=PATH`
+ * overrides suitable for forwarding as repeated `--marketplace-path`
+ * arguments.
+ *
+ * Separator is newline only. `,` is a legal filename character, so
+ * comma-splitting would silently mangle paths like
+ * `releases/v1,beta.json`. This matches the convention used by
+ * `actions/upload-artifact` and `gh` for multi-path inputs.
+ *
+ * Empty/blank lines are stripped. Lines that do not match `FORMAT=PATH`
+ * are surfaced as errors -- silently dropping them turns into a debugging
+ * trap when CI emits the "wrong" file.
+ *
+ * The PATH portion is forwarded verbatim to `apm pack --marketplace-path`
+ * and the APM CLI is the source of truth for path-containment / traversal
+ * checks on its output writes. The action layer intentionally delegates
+ * that validation so format-specific rules (e.g. extension constraints)
+ * stay in one place.
+ */
+function parseMarketplacePath(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  const items = trimmed
+    .split('\n')
+    .map(s => s.trim())
+    .filter(s => s.length > 0);
+  for (const item of items) {
+    if (!/^[A-Za-z0-9_-]+=.+$/.test(item)) {
+      throw new Error(
+        `marketplace-path entries must be in 'FORMAT=PATH' shape `
+        + `(e.g. 'claude=marketplace.json'); got: '${item}'. `
+        + `Provide one override per line.`,
+      );
+    }
+  }
+  return items;
+}
+
+/**
  * Run the APM action: install agent primitives.
  *
  * Default behavior (no inputs): reads apm.yml, runs apm install. Done.
@@ -107,6 +146,11 @@ export async function run(): Promise<void> {
       // already covers it; flagging archive separately surprises users
       // whose composite-action templates emit `archive: 'true'` by default.
       if (core.getInput('bundle-format').trim()) conflicts.push('bundle-format');
+      if (core.getInput('marketplace').trim()) conflicts.push('marketplace');
+      if (core.getInput('marketplace-path').trim()) conflicts.push('marketplace-path');
+      if (core.getInput('json-output').trim()) conflicts.push('json-output');
+      if (core.getInput('offline') === 'true') conflicts.push('offline');
+      if (core.getInput('include-prerelease') === 'true') conflicts.push('include-prerelease');
       if (conflicts.length > 0) {
         throw new Error(
           `'setup-only' is mutually exclusive with: ${conflicts.join(', ')}. `
@@ -146,6 +190,25 @@ export async function run(): Promise<void> {
         `inputs 'pack', 'bundle', and 'bundles-file' are mutually exclusive `
         + `(got: ${modeFlags.join(', ')}). Pick exactly one mode per step.`,
       );
+    }
+
+    // Reject pack pass-through inputs outside pack mode early, so they
+    // are not silently ignored in bundle / bundles-file restore paths or
+    // in the default install flow. Matches the setup-only conflict shape.
+    if (!packInput) {
+      const marketplaceMisuse: string[] = [];
+      if (core.getInput('marketplace').trim()) marketplaceMisuse.push('marketplace');
+      if (core.getInput('marketplace-path').trim()) marketplaceMisuse.push('marketplace-path');
+      if (core.getInput('json-output').trim()) marketplaceMisuse.push('json-output');
+      if (core.getInput('offline') === 'true') marketplaceMisuse.push('offline');
+      if (core.getInput('include-prerelease') === 'true') marketplaceMisuse.push('include-prerelease');
+      if (marketplaceMisuse.length > 0) {
+        const label = marketplaceMisuse.length === 1 ? 'input was' : 'inputs were';
+        throw new Error(
+          `${marketplaceMisuse.join(', ')} ${label} set but pack is not enabled. `
+          + `Set pack: true to forward these inputs to apm pack, or remove them.`,
+        );
+      }
     }
 
     // Directory creation contract:
@@ -356,16 +419,32 @@ export async function run(): Promise<void> {
     if (packInput) {
       const archive = core.getInput('archive') !== 'false';
       const bundleFormat = resolveBundleFormat();
+      const marketplace = core.getInput('marketplace').trim() || undefined;
+      const marketplacePath = parseMarketplacePath(core.getInput('marketplace-path'));
+      const offline = core.getInput('offline') === 'true';
+      const includePrerelease = core.getInput('include-prerelease') === 'true';
+      const jsonOutput = core.getInput('json-output').trim() || undefined;
       const packResult = await runPackStep(resolvedDir, {
         target: validatedTarget,
         archive,
         format: bundleFormat,
+        marketplace,
+        marketplacePath,
+        offline,
+        includePrerelease,
+        jsonOutput,
       });
-      core.setOutput('bundle-path', packResult.bundlePath);
+      // Empty string when no bundle was produced -- preserves the
+      // previous output contract for marketplace-only projects.
+      core.setOutput('bundle-path', packResult.bundlePath ?? '');
       core.setOutput('bundle-format', packResult.format);
+      core.setOutput('pack-json', packResult.marketplaceJsonPath ?? '');
     } else {
       // bundle-format only makes sense with pack: true. Surface the misuse
       // explicitly rather than silently ignoring the input.
+      // (Marketplace pass-through inputs are rejected earlier, before any
+      // mode-specific work, so they reject consistently across bundle /
+      // bundles-file / default install paths.)
       const fmtRaw = core.getInput('bundle-format').trim();
       if (fmtRaw) {
         throw new Error(
