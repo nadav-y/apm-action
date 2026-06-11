@@ -46,6 +46,7 @@ const {
   runGate,
   packPackage,
   runReleaseMode,
+  runRegistryPublish,
 } = await import('../release.js');
 
 describe('resolveReleaseTag', () => {
@@ -539,5 +540,130 @@ describe('runReleaseMode (integration, mocked exec)', () => {
       skipPublish: true,
     })).rejects.toThrow(/marketplace drift/);
     expect(mockSetOutput).toHaveBeenCalledWith('marketplace-drift', 'true');
+  });
+});
+
+describe('runRegistryPublish', () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'release-reg-'));
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makePackages(names: string[]) {
+    return names.map(name => ({
+      name,
+      version: '1.0.0',
+      dir: tmpDir,
+    }));
+  }
+
+  it('enables experimental gate and publishes single package', async () => {
+    // enable registries
+    mockExec.mockImplementationOnce(async (_cmd, args) => {
+      expect(args).toEqual(['experimental', 'enable', 'registries']);
+      return 0;
+    });
+    // apm publish
+    mockExec.mockImplementationOnce(async (_cmd, args, opts) => {
+      expect(args).toEqual(['publish', '--package', 'acme/web-skills', '--registry', 'corp-main']);
+      expect(opts?.cwd).toBe(tmpDir);
+      return 0;
+    });
+
+    const results = await runRegistryPublish(
+      makePackages(['acme/web-skills']),
+      'corp-main',
+      'acme/web-skills',
+      false,
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toEqual({ name: 'acme/web-skills', version: '1.0.0', registry: 'corp-main' });
+    expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses pkg.name as package id when registryPackage is empty', async () => {
+    mockExec.mockImplementationOnce(async () => 0); // enable
+    mockExec.mockImplementationOnce(async (_cmd, args) => {
+      expect(args).toContain('my-pkg');
+      return 0;
+    });
+
+    const results = await runRegistryPublish(
+      makePackages(['my-pkg']),
+      '',
+      '',
+      false,
+    );
+
+    expect(results[0].registry).toBe('(auto)');
+  });
+
+  it('omits --registry when registryName is empty', async () => {
+    mockExec.mockImplementationOnce(async () => 0); // enable
+    mockExec.mockImplementationOnce(async (_cmd, args) => {
+      expect(args).not.toContain('--registry');
+      return 0;
+    });
+
+    await runRegistryPublish(makePackages(['pkg']), '', '', false);
+  });
+
+  it('passes --dry-run when dryRun=true', async () => {
+    mockExec.mockImplementationOnce(async () => 0); // enable
+    mockExec.mockImplementationOnce(async (_cmd, args) => {
+      expect(args).toContain('--dry-run');
+      return 0;
+    });
+
+    await runRegistryPublish(makePackages(['pkg']), 'reg', 'pkg', true);
+  });
+
+  it('publishes each package in aggregator shape', async () => {
+    const pkgA = { name: 'acme/alpha', version: '1.0.0', dir: tmpDir };
+    const pkgB = { name: 'acme/beta', version: '1.0.0', dir: tmpDir };
+
+    mockExec.mockImplementationOnce(async () => 0); // enable
+    const publishedIds: string[] = [];
+    mockExec.mockImplementation(async (_cmd, args) => {
+      const idx = args?.indexOf('--package') ?? -1;
+      if (idx !== -1 && args) publishedIds.push(args[idx + 1]);
+      return 0;
+    });
+
+    const results = await runRegistryPublish([pkgA, pkgB], 'reg', '', false);
+
+    expect(results).toHaveLength(2);
+    expect(publishedIds).toEqual(['acme/alpha', 'acme/beta']);
+  });
+
+  it('throws when registryPackage set on multi-package aggregator', async () => {
+    await expect(
+      runRegistryPublish(
+        [makePackages(['a'])[0], makePackages(['b'])[0]],
+        'reg',
+        'explicit/pkg',
+        false,
+      ),
+    ).rejects.toThrow(/release-registry-package cannot be used with an aggregator/);
+  });
+
+  it('throws when experimental enable fails', async () => {
+    mockExec.mockImplementationOnce(async () => 1);
+    await expect(
+      runRegistryPublish(makePackages(['pkg']), '', '', false),
+    ).rejects.toThrow(/apm experimental enable registries failed/);
+  });
+
+  it('throws when apm publish fails for a package', async () => {
+    mockExec.mockImplementationOnce(async () => 0); // enable
+    mockExec.mockImplementationOnce(async () => 1); // publish fails
+    await expect(
+      runRegistryPublish(makePackages(['pkg']), '', '', false),
+    ).rejects.toThrow(/apm publish failed for pkg@1\.0\.0/);
   });
 });

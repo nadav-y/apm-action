@@ -17,7 +17,7 @@ inputs:
       prevents downstream workflows from being broken by an unrelated APM release. Pass
       "latest" explicitly to opt in to floating, or pin to a different tag for reproducibility.
     required: false
-    default: '0.14.0'
+    default: '0.15.0'
   script:
     description: 'APM script to run after install (optional — by default only install runs)'
     required: false
@@ -192,6 +192,40 @@ inputs:
       validate the pipeline without publishing. Default: false.
     required: false
     default: 'false'
+  release-registry-publish:
+    description: |
+      Used with mode: release. When true, publishes each packed package to
+      an APM registry via `apm publish` after the matrix-pack step.
+      Requires apm >= 0.15.0 and the `registries` experimental feature
+      (enabled automatically). Registry credentials are resolved from
+      environment variables or ~/.apm/config.json. See the APM registries
+      guide for auth details.
+    required: false
+    default: 'false'
+  release-registry-name:
+    description: |
+      Used with mode: release and release-registry-publish: true.
+      Registry name to publish to. Required when multiple registries are
+      configured (in apm.yml or global ~/.apm/config.json); auto-selected
+      when exactly one registry is configured.
+    required: false
+    default: ''
+  release-registry-package:
+    description: |
+      Used with mode: release and release-registry-publish: true.
+      Registry package identifier in OWNER/REPO form (e.g. acme/web-skills).
+      Required for single-plugin repos. For aggregator repos each plugin's
+      apm.yml name is used as the package identifier; setting this input is
+      an error when more than one plugin is present.
+    required: false
+    default: ''
+  release-registry-dry-run:
+    description: |
+      Used with mode: release and release-registry-publish: true.
+      Pass --dry-run to apm publish: validates the publish operation without
+      uploading the archive. Useful for CI validation on non-tag branches.
+    required: false
+    default: 'false'
 
 outputs:
   success:
@@ -229,6 +263,13 @@ outputs:
     description: |
       Set by mode: release. URL of the GitHub Release created by this
       run. Empty when release-skip-publish=true.
+  registry-publish-results:
+    description: |
+      Set by mode: release when release-registry-publish: true.
+      JSON array of per-package publish results. Each element has:
+        {name, version, registry}
+      Always emitted as '[]' (empty array) when registry publish is not
+      enabled, so downstream steps can parse it unconditionally.
   release-tag:
     description: |
       Set by mode: release. Resolved release tag (input or

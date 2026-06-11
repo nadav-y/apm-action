@@ -41,6 +41,7 @@ run_scenario() {
   local fixture="$2"
   local tag="$3"
   local extra_env="${4:-}"
+  local extra_output_key="${5:-}"
 
   echo
   echo "=== Scenario: $name ==="
@@ -121,12 +122,25 @@ run_scenario() {
     return
   fi
 
+  # Optional: assert an additional output key is present
+  if [[ -n "$extra_output_key" ]]; then
+    if ! grep -q "^${extra_output_key}<<" "$outputs_file" && ! grep -q "^${extra_output_key}=" "$outputs_file"; then
+      echo "FAIL ($name): $extra_output_key output not present"
+      cat "$outputs_file"
+      FAILED=$((FAILED + 1))
+      return
+    fi
+  fi
+
   echo "PASS ($name)"
   PASSED=$((PASSED + 1))
 }
 
 run_scenario "aggregator-happy-path" "aggregator" "v1.0.0"
 run_scenario "single-plugin-happy-path" "single-plugin" "v1.0.0"
+run_scenario "registry-publish-dry-run" "single-plugin-registry" "v1.0.0" \
+  "INPUT_RELEASE-REGISTRY-PUBLISH=true INPUT_RELEASE-REGISTRY-DRY-RUN=true INPUT_RELEASE-REGISTRY-PACKAGE=acme/solo-demo" \
+  "registry-publish-results"
 
 echo
 echo "=== Summary ==="

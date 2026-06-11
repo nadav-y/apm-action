@@ -26,6 +26,16 @@ export interface ReleaseOptions {
   releaseDraft: boolean;
   releasePrerelease: 'true' | 'false' | 'auto';
   skipPublish: boolean;
+  registryPublish?: boolean;
+  registryName?: string;
+  registryPackage?: string;
+  registryDryRun?: boolean;
+}
+
+export interface RegistryPublishResult {
+  name: string;
+  version: string;
+  registry: string;
 }
 
 export interface PackagedArtifact {
@@ -41,6 +51,7 @@ export interface ReleaseResult {
   marketplaceDrift: boolean;
   releaseUrl: string;
   releaseTag: string;
+  registryPublishResults: RegistryPublishResult[];
 }
 
 /** Shape detected from the project layout. */
@@ -398,12 +409,76 @@ export function stageMarketplaceJson(
   return null;
 }
 
+/**
+ * Publish each package to an APM registry via `apm publish`.
+ *
+ * Enables the experimental registries feature gate, then invokes
+ * `apm publish --package <id> [--registry <name>] [--dry-run]` once per
+ * package from that package's source directory. `apm publish` performs its
+ * own auto-pack to a flat `.zip` archive (separate from the `.tar.gz`
+ * produced by the matrix-pack step).
+ *
+ * For single-plugin repos, `registryPackage` must supply the OWNER/REPO
+ * identity. For aggregator repos, each plugin's `apm.yml` `name` field is
+ * used as the package identity; `registryPackage` is an error in that case.
+ */
+export async function runRegistryPublish(
+  packages: { name: string; version: string; dir: string }[],
+  registryName: string,
+  registryPackage: string,
+  dryRun: boolean,
+): Promise<RegistryPublishResult[]> {
+  if (registryPackage && packages.length > 1) {
+    throw new Error(
+      `release-registry-package cannot be used with an aggregator repo `
+      + `(${packages.length} packages found). Each plugin's apm.yml name is `
+      + `used as the package identifier. Remove release-registry-package or `
+      + `switch to single-plugin shape.`,
+    );
+  }
+
+  core.info('Enabling experimental registries feature...');
+  const enableRc = await exec.exec('apm', ['experimental', 'enable', 'registries'], {
+    ignoreReturnCode: true,
+  });
+  if (enableRc !== 0) {
+    throw new Error(`apm experimental enable registries failed (exit ${enableRc})`);
+  }
+
+  const results: RegistryPublishResult[] = [];
+  for (const pkg of packages) {
+    const packageId = registryPackage || pkg.name;
+    const args = ['publish', '--package', packageId];
+    if (registryName) args.push('--registry', registryName);
+    if (dryRun) args.push('--dry-run');
+
+    const dryRunSuffix = dryRun ? ' (dry-run)' : '';
+    core.info(`Publishing ${packageId}@${pkg.version} to registry${dryRunSuffix}...`);
+    const rc = await exec.exec('apm', args, {
+      cwd: pkg.dir,
+      ignoreReturnCode: true,
+    });
+    if (rc !== 0) {
+      throw new Error(
+        `apm publish failed for ${packageId}@${pkg.version} (exit ${rc})`,
+      );
+    }
+
+    const resolvedRegistry = registryName || '(auto)';
+    results.push({ name: pkg.name, version: pkg.version, registry: resolvedRegistry });
+    core.info(`Published ${packageId}@${pkg.version} -> ${resolvedRegistry}${dryRunSuffix}`);
+  }
+
+  return results;
+}
+
 function renderStepSummary(
   shape: RepoShape,
   tag: string,
   packages: PackagedArtifact[],
   marketplacePath: string | null,
   skipPublish: boolean,
+  registryPublishResults: RegistryPublishResult[],
 ): string {
   const rows = packages.map(p =>
     `| \`${p.name}\` | \`${p.version}\` | \`${path.basename(p.bundle)}\` | \`${p.sha256.slice(0, 12)}...\` |`,
@@ -414,6 +489,12 @@ function renderStepSummary(
   const publishLine = skipPublish
     ? `**Publish:** skipped (release-skip-publish=true)`
     : `**Publish:** gh release create ${tag}`;
+  const registryLines = registryPublishResults.length > 0
+    ? [
+        ``,
+        `**Registry publish:** ${registryPublishResults.map(r => `\`${r.name}@${r.version}\` → \`${r.registry}\``).join(', ')}`,
+      ]
+    : [];
   return [
     `## APM release \`${tag}\``,
     ``,
@@ -422,6 +503,7 @@ function renderStepSummary(
     marketplaceLine,
     ``,
     publishLine,
+    ...registryLines,
     ``,
     `| package | version | bundle | sha256 |`,
     `|---|---|---|---|`,
@@ -505,6 +587,18 @@ export async function runReleaseMode(opts: ReleaseOptions): Promise<ReleaseResul
     core.info(`Packed ${pkg.name}@${pkg.version}: ${path.basename(bundle)} (${hex.slice(0, 12)}...)`);
   }
 
+  // 2.5. Registry publish (opt-in, experimental)
+  let registryPublishResults: RegistryPublishResult[] = [];
+  if (opts.registryPublish) {
+    core.info('Publishing packages to APM registry...');
+    registryPublishResults = await runRegistryPublish(
+      packages,
+      opts.registryName ?? '',
+      opts.registryPackage ?? '',
+      opts.registryDryRun ?? false,
+    );
+  }
+
   // 3. Stage marketplace.json (aggregator only, typically)
   // Pick the highest semver-ish version among packages for the suffix when
   // there is no top-level package; fall back to the tag. Sanitize because
@@ -517,7 +611,7 @@ export async function runReleaseMode(opts: ReleaseOptions): Promise<ReleaseResul
 
   // 4. Step summary (best-effort; never fails the run)
   try {
-    const summary = renderStepSummary(shape, tag, results, marketplacePath, opts.skipPublish);
+    const summary = renderStepSummary(shape, tag, results, marketplacePath, opts.skipPublish, registryPublishResults);
     await core.summary.addRaw(summary).write();
   } catch (err) {
     core.warning(`Could not write step summary: ${err instanceof Error ? err.message : String(err)}`);
@@ -580,5 +674,6 @@ export async function runReleaseMode(opts: ReleaseOptions): Promise<ReleaseResul
     marketplaceDrift: drift,
     releaseUrl,
     releaseTag: tag,
+    registryPublishResults,
   };
 }

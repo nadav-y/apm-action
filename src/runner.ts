@@ -98,10 +98,11 @@ export async function run(): Promise<void> {
     const packInput = core.getInput('pack') === 'true';
     const isolated = core.getInput('isolated') === 'true';
 
-    // Default `packages` output to '[]' so downstream `fromJSON()` steps
-    // can parse it unconditionally regardless of mode. mode: release
-    // overwrites this with the actual JSON array of packed artifacts.
+    // Default `packages` and `registry-publish-results` outputs to '[]' so
+    // downstream `fromJSON()` steps can parse them unconditionally regardless
+    // of mode. mode: release overwrites these with the actual arrays.
     core.setOutput('packages', '[]');
+    core.setOutput('registry-publish-results', '[]');
 
     // MODE DISPATCH (umbrella orchestration). When `mode` is set, it
     // supersedes pack/bundle/setup-only/etc. -- the mode runs its own
@@ -182,12 +183,17 @@ export async function run(): Promise<void> {
           releaseDraft: core.getInput('release-draft') === 'true',
           releasePrerelease: releasePrerelease as 'true' | 'false' | 'auto',
           skipPublish: core.getInput('release-skip-publish') === 'true',
+          registryPublish: core.getInput('release-registry-publish') === 'true',
+          registryName: core.getInput('release-registry-name').trim(),
+          registryPackage: core.getInput('release-registry-package').trim(),
+          registryDryRun: core.getInput('release-registry-dry-run') === 'true',
         });
 
         core.setOutput('packages', JSON.stringify(result.packages));
         core.setOutput('marketplace-drift', result.marketplaceDrift ? 'true' : 'false');
         core.setOutput('release-url', result.releaseUrl);
         core.setOutput('release-tag', result.releaseTag);
+        core.setOutput('registry-publish-results', JSON.stringify(result.registryPublishResults));
         core.setOutput('success', 'true');
         core.info(`APM action completed successfully (mode: release)`);
         return;

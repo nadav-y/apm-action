@@ -148,8 +148,6 @@ jobs:
           mode: release
           # release-tag defaults to GITHUB_REF_NAME
           # release-prerelease: auto  (detects -rc/-alpha/-beta/-pre suffix)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 What it does, in order:
@@ -158,13 +156,37 @@ What it does, in order:
 2. Detect repo shape (`aggregator` if `plugins/<name>/apm.yml` files exist, otherwise `single-plugin`).
 3. Matrix-pack every package with `apm pack --offline --archive` -> tarballs in `dist/`.
 4. Write `<tarball>.sha256` sidecars next to each tarball.
-5. Stage `marketplace-<version>.json` for aggregator shapes.
-6. Render a GitHub Step Summary table of the release contents.
-7. `gh release create <tag> <files...>` (skipped if `release-skip-publish: true`).
+5. _(Optional)_ Publish each package to an APM registry via `apm publish` (see below).
+6. Stage `marketplace-<version>.json` for aggregator shapes.
+7. Render a GitHub Step Summary table of the release contents.
+8. `gh release create <tag> <files...>` (skipped if `release-skip-publish: true`).
 
-Outputs: `packages` (JSON), `marketplace-drift`, `release-url`, `release-tag`.
+Outputs: `packages` (JSON), `marketplace-drift`, `release-url`, `release-tag`, `registry-publish-results` (JSON).
 
 For the non-GitHub-Actions equivalent (the same primitives wrapped in `.gitlab-ci.yml`, `Jenkinsfile`, ADO `azure-pipelines.yml`), see [`producer/releasing-from-any-ci.md`](https://microsoft.github.io/apm/producer/releasing-from-any-ci/).
+
+#### Registry publish (optional, experimental)
+
+Set `release-registry-publish: true` to also push each package to an APM registry after packing. This is **additive** — the GitHub Release is still created as normal.
+
+```yaml
+      - uses: microsoft/apm-action@v1
+        with:
+          mode: release
+          release-registry-publish: true
+          release-registry-name: corp-main        # optional; required only when multiple registries are configured
+          release-registry-package: acme/web-skills  # OWNER/REPO identity (single-plugin)
+        env:
+          APM_REGISTRY_TOKEN_CORP_MAIN: ${{ secrets.APM_REGISTRY_TOKEN }}
+```
+
+For aggregator repos (multiple plugins under `plugins/`), each plugin's `apm.yml` `name` is used as the package identifier automatically — omit `release-registry-package`. For single-plugin repos, `release-registry-package` is required.
+
+For authentication details (env-var naming, Bearer vs Basic, `~/.apm/config.json`) see the [APM registries guide](https://microsoft.github.io/apm/guides/registries/).
+
+> **Feature gate:** the `registries` experimental feature is enabled automatically when `release-registry-publish: true`. No manual `apm experimental enable registries` step needed.
+
+Use `release-registry-dry-run: true` to validate the publish without uploading (useful on PR branches).
 
 ### Restore mode (verified extraction)
 
@@ -328,6 +350,17 @@ For multi-org or multi-platform scenarios, use the `env:` block for full control
 | `offline` | No | `false` | Forwarded to `apm pack --offline` (used with `pack: true`). Skips network resolution of marketplace dependency refs. Useful in hermetic CI where versions are pinned in `apm.lock.yaml`. |
 | `include-prerelease` | No | `false` | Forwarded to `apm pack --include-prerelease` (used with `pack: true`). Considers pre-release version tags when resolving marketplace dependency refs. |
 | `audit-report` | No | | Generate a SARIF audit report (hidden Unicode scanning). `apm install` already blocks critical findings; this adds reporting for Code Scanning and a markdown summary in `$GITHUB_STEP_SUMMARY`. Set to `true` for default path, or provide a custom path. |
+| `mode` | No | | High-level orchestration mode. `release` runs the full release pipeline (gate → pack → registry publish → marketplace stage → GH Release). Mutually exclusive with `pack`, `bundle`, `bundles-file`, `setup-only`. |
+| `release-tag` | No | `$GITHUB_REF_NAME` | Tag for the GitHub Release (e.g. `v1.2.3`). Defaults to `GITHUB_REF_NAME` when triggered by a tag push. |
+| `release-name` | No | | Display name for the GitHub Release. Defaults to `release-tag`. |
+| `release-notes` | No | | Body for the GitHub Release. Auto-generated (package table + sha256 verify hint) when empty. |
+| `release-draft` | No | `false` | Create the GitHub Release as a draft. |
+| `release-prerelease` | No | `auto` | `true`, `false`, or `auto`. `auto` marks the release as a prerelease when the tag contains `-` (e.g. `v1.2.3-rc.1`). |
+| `release-skip-publish` | No | `false` | Run every release step except `gh release create`. Useful for dry-runs and PR builds. |
+| `release-registry-publish` | No | `false` | Publish each packed package to an APM registry via `apm publish` after the matrix-pack step. Enables the `registries` experimental feature automatically. See [Registry publish](#registry-publish-optional-experimental). |
+| `release-registry-name` | No | | Registry name to publish to. Required when multiple registries are configured (in `apm.yml` or global `~/.apm/config.json`); auto-selected when exactly one is configured. |
+| `release-registry-package` | No | | Registry package identity in `OWNER/REPO` form (e.g. `acme/web-skills`). Required for single-plugin repos. For aggregator repos, each plugin's `apm.yml` `name` is used automatically; setting this is an error when more than one plugin is present. |
+| `release-registry-dry-run` | No | `false` | Pass `--dry-run` to `apm publish`: validates the operation without uploading. |
 
 ## Outputs
 
@@ -342,6 +375,11 @@ For multi-org or multi-platform scenarios, use the `env:` block for full control
 | `pack-json` | Path to the captured `apm pack --json` report. Set when the `json-output` input was provided. Source of truth for downstream steps that need to enumerate every artifact (bundles, marketplace files, sidecars) without globbing `build/`. |
 | `audit-report-path` | Path to the generated SARIF audit report (if `audit-report` was set) |
 | `bundles-restored` | Number of bundles successfully restored (multi-bundle mode only) |
+| `packages` | `mode: release` — JSON array of packed artifacts. Each element: `{name, version, bundle, sha256, sha256_path}`. Always `[]` outside release mode. |
+| `marketplace-drift` | `mode: release` — `true` when `apm pack --check-clean` detected uncommitted marketplace drift (the run also fails). |
+| `release-url` | `mode: release` — URL of the created GitHub Release. Empty when `release-skip-publish: true`. |
+| `release-tag` | `mode: release` — Resolved release tag (`release-tag` input or `GITHUB_REF_NAME`). |
+| `registry-publish-results` | `mode: release` — JSON array of per-package registry publish results when `release-registry-publish: true`. Each element: `{name, version, registry}`. Always `[]` when registry publish is not enabled. |
 
 ## Third-Party Dependencies
 
