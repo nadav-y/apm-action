@@ -16,12 +16,12 @@ The floating `v1` tag tracks the latest `1.x` release. Consumers pinning
   - New inputs: `release-registry-publish`, `release-registry-name` (required only when multiple registries are configured; auto-selected otherwise), `release-registry-package` (required for single-plugin repos; aggregator repos derive the identity from each plugin's `apm.yml` `name`), `release-registry-dry-run` (validates without uploading).
   - New output: `registry-publish-results` — JSON array of `{name, version, registry}` per published package. Always `[]` when registry publish is not enabled.
   - The `registries` experimental feature gate is enabled automatically; no manual `apm experimental enable registries` step required.
-  - Requires `apm` >= 0.15.0 (`apm publish` is not available in earlier versions). The `apm-version` default is bumped to `0.15.0` accordingly.
+  - Requires `apm` >= 0.20.0 (`apm publish` is not available in earlier versions). The `apm-version` default is bumped to `0.20.0` accordingly.
   - Requires APM registry credentials in the workflow environment (`APM_REGISTRY_TOKEN_<NAME>` or `APM_REGISTRY_USER_<NAME>` / `APM_REGISTRY_PASS_<NAME>`). See the [APM registries guide](https://microsoft.github.io/apm/guides/registries/) for auth details.
 
 ### Changed
 
-- **`apm-version` default bumped to `0.15.0`** (was `0.14.0`). Required for `apm publish` support (`release-registry-publish: true`). Consumers pinning `apm-version` explicitly are unaffected.
+- **`apm-version` default bumped to `0.20.0`** (was `0.14.0`). Required for `apm publish` support (`release-registry-publish: true`). Consumers pinning `apm-version` explicitly are unaffected.
 
 ## [1.9.1] - 2026-05-19
 
